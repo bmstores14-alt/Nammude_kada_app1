@@ -1,0 +1,99 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Unpack the app
+        run: unzip -q nammude_kada_app.zip
+
+      - name: Create the Android platform files
+        working-directory: nammude_kada
+        run: |
+          flutter create --platforms android --org store.nammudekada --project-name nammude_kada ../_gen
+          cp -r ../_gen/android android
+          rm -rf ../_gen
+
+      - name: Patch AndroidManifest
+        working-directory: nammude_kada
+        run: |
+          python3 - <<'PY'
+          import re
+          p = 'android/app/src/main/AndroidManifest.xml'
+          s = open(p, encoding='utf-8').read()
+          perms = '''
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <queries>
+                <intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent>
+                <intent><action android:name="android.intent.action.VIEW"/><data android:scheme="tel"/></intent>
+              </queries>
+          '''
+          s = re.sub(r'(<manifest[^>]*>)', lambda m: m.group(1) + perms, s, count=1)
+          s = s.replace('android:label="nammude_kada"', 'android:label="Nammude Kada"')
+          open(p, 'w', encoding='utf-8').write(s)
+          PY
+
+      - name: Write env.json from secrets
+        working-directory: nammude_kada
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          json.dump({"SUPABASE_URL": os.environ["SUPABASE_URL"],
+                     "SUPABASE_ANON_KEY": os.environ["SUPABASE_ANON_KEY"]}, open("env.json", "w"))
+          PY
+
+      - name: Dependencies and translations
+        working-directory: nammude_kada
+        run: |
+          flutter pub get
+          flutter gen-l10n
+
+      - name: Analyze (log is saved, does not stop the build)
+        working-directory: nammude_kada
+        run: flutter analyze > analyze.log 2>&1 || true
+
+      - name: Tests (log is saved, does not stop the build)
+        working-directory: nammude_kada
+        run: flutter test > test.log 2>&1 || true
+
+      - name: Build APK
+        working-directory: nammude_kada
+        run: flutter build apk --release --dart-define-from-file=env.json 2>&1 | tee build.log
+
+      - name: Save the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: |
+            nammude_kada/analyze.log
+            nammude_kada/test.log
+            nammude_kada/build.log
+          if-no-files-found: ignore
+
+      - name: Save the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nammude-kada-apk
+          path: nammude_kada/build/app/outputs/flutter-apk/app-release.apk
